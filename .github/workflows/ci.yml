@@ -1,0 +1,25 @@
+name: Verify
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - name: Test adapters and CLI
+        run: python3 scripts/build.py --test
+      - name: Build native CLI
+        run: python3 scripts/build.py
+      - name: Verify installed behavior
+        run: python3 scripts/smoke.py
