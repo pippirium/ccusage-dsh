@@ -1,0 +1,398 @@
+diff --git a/rust/Cargo.toml b/rust/Cargo.toml
+index 63f1493..1778559 100644
+--- a/rust/Cargo.toml
++++ b/rust/Cargo.toml
+@@ -35,6 +35,7 @@ ccusage-adapter-openclaw = { path = "adapters/openclaw" }
+ ccusage-adapter-opencode = { path = "adapters/opencode" }
+ ccusage-adapter-pi = { path = "adapters/pi" }
+ ccusage-adapter-qwen = { path = "adapters/qwen" }
++ccusage-adapter-devin = { path = "adapters/devin" }
+ ccusage-adapter-dsh = { path = "adapters/dsh" }
+ ccusage-adapter-zcode = { path = "adapters/zcode" }
+ ccusage-cli = { path = "crates/ccusage-cli" }
+diff --git a/rust/crates/ccusage-adapter-all/Cargo.toml b/rust/crates/ccusage-adapter-all/Cargo.toml
+index 9de7f37..0af09c5 100644
+--- a/rust/crates/ccusage-adapter-all/Cargo.toml
++++ b/rust/crates/ccusage-adapter-all/Cargo.toml
+@@ -23,6 +23,7 @@ ccusage-adapter-openclaw.workspace = true
+ ccusage-adapter-opencode.workspace = true
+ ccusage-adapter-pi.workspace = true
+ ccusage-adapter-qwen.workspace = true
++ccusage-adapter-devin.workspace = true
+ ccusage-adapter-dsh.workspace = true
+ ccusage-adapter-zcode.workspace = true
+ ccusage-cli.workspace = true
+diff --git a/rust/crates/ccusage-adapter-all/src/lib.rs b/rust/crates/ccusage-adapter-all/src/lib.rs
+index b52eb46..c4daec2 100644
+--- a/rust/crates/ccusage-adapter-all/src/lib.rs
++++ b/rust/crates/ccusage-adapter-all/src/lib.rs
+@@ -15,6 +15,7 @@ mod adapter {
+     pub use ccusage_adapter_codebuff as codebuff;
+     pub use ccusage_adapter_codex as codex;
+     pub use ccusage_adapter_copilot as copilot;
++    pub use ccusage_adapter_devin as devin;
+     pub use ccusage_adapter_droid as droid;
+     pub use ccusage_adapter_dsh as dsh;
+     pub use ccusage_adapter_gemini as gemini;
+diff --git a/rust/crates/ccusage-adapter-all/src/loader.rs b/rust/crates/ccusage-adapter-all/src/loader.rs
+index 865b222..72e901c 100644
+--- a/rust/crates/ccusage-adapter-all/src/loader.rs
++++ b/rust/crates/ccusage-adapter-all/src/loader.rs
+@@ -11,8 +11,8 @@ use crate::{
+     BUILT_IN_AGENT_NAMES, CodexGroup, LoadedEntry, ModelBreakdown, PricingMap, Result,
+     SessionAccumulator, UsageSummary,
+     adapter::{
+-        amp, antigravity, claude, codebuff, codex, copilot, droid, dsh, gemini, goose, grok,
+-        hermes, kilo, kimi, openclaw, opencode, pi, qwen, zcode,
++        amp, antigravity, claude, codebuff, codex, copilot, devin, droid, dsh, gemini, goose,
++        grok, hermes, kilo, kimi, openclaw, opencode, pi, qwen, zcode,
+     },
+     cli::{AgentReportKind, CodexSpeed, CostMode, NamedPiStore, SharedArgs, SourceArgs, WeekDay},
+     filter_loaded_entries_by_date, json_float,
+@@ -170,7 +170,7 @@ fn load_pricing(
+     let mut cached = Vec::new();
+     let pricing_by_source = BUILT_IN_AGENT_NAMES
+         .iter()
+-        .filter(|agent| !["claude", "opencode", "qwen", "dsh"].contains(agent))
++        .filter(|agent| !["claude", "opencode", "qwen", "dsh", "devin"].contains(agent))
+         .map(|agent| {
+             (
+                 *agent,
+@@ -517,6 +517,12 @@ fn load_base_rows(
+             progress_agent: crate::progress::UsageLoadAgent("DSH"),
+             load: Box::new(|| load_dsh_rows(load_kind, &source_shared["dsh"])),
+         },
++        AgentLoadSpec {
++            index: 19,
++            agent: BUILT_IN_AGENT_NAMES[19],
++            progress_agent: crate::progress::UsageLoadAgent("Devin"),
++            load: Box::new(|| load_devin_rows(load_kind, &source_shared["devin"])),
++        },
+     ];
+     let named_pi_stores = resolve_named_pi_store_paths(&shared.pi_stores, pi_path)?;
+     for store in named_pi_stores {
+@@ -926,6 +932,25 @@ fn load_dsh_rows(kind: AgentReportKind, shared: &SharedArgs) -> Result<AgentRows
+     })
+ }
+ 
++fn load_devin_rows(kind: AgentReportKind, shared: &SharedArgs) -> Result<AgentRows> {
++    let mut entries = devin::load_entries(shared)?;
++    let detected = !entries.is_empty() || devin::has_data();
++    if kind == AgentReportKind::Session {
++        let mut summaries = devin::summarize_entries(&entries, kind)?;
++        filter_session_summaries(&mut summaries, shared);
++        return Ok(AgentRows {
++            rows: summary_rows("devin", summaries, false),
++            detected,
++        });
++    }
++    filter_loaded_entries_by_date(&mut entries, shared);
++    let summaries = devin::summarize_entries(&entries, kind)?;
++    Ok(AgentRows {
++        rows: summary_rows("devin", summaries, false),
++        detected,
++    })
++}
++
+ fn summarize_entry_sessions(entries: &[LoadedEntry]) -> Result<Vec<UsageSummary>> {
+     let mut groups = BTreeMap::<(String, String), SessionAccumulator>::new();
+     for entry in entries {
+@@ -1161,7 +1186,7 @@ mod tests {
+             );
+         }
+         for agent in BUILT_IN_AGENT_NAMES {
+-            if !["claude", "opencode", "qwen", "dsh"].contains(agent) {
++            if !["claude", "opencode", "qwen", "dsh", "devin"].contains(agent) {
+                 assert!(
+                     pricing_by_source.contains_key(agent),
+                     "{agent} needs a pricing map"
+diff --git a/rust/crates/ccusage-adapter-all/src/report.rs b/rust/crates/ccusage-adapter-all/src/report.rs
+index bf31493..fc4c5d3 100644
+--- a/rust/crates/ccusage-adapter-all/src/report.rs
++++ b/rust/crates/ccusage-adapter-all/src/report.rs
+@@ -613,6 +613,7 @@ fn agent_label(agent: &str) -> &str {
+         "antigravity" => "Antigravity",
+         "kimi" => "Kimi",
+         "qwen" => "Qwen",
++        "devin" => "Devin",
+         "dsh" => "DSH",
+         "grok" => "Grok",
+         "zcode" => "ZCode",
+diff --git a/rust/crates/ccusage-cli-parser/src/cli-commands.json b/rust/crates/ccusage-cli-parser/src/cli-commands.json
+index 4d086c4..6f72434 100644
+--- a/rust/crates/ccusage-cli-parser/src/cli-commands.json
++++ b/rust/crates/ccusage-cli-parser/src/cli-commands.json
+@@ -20,6 +20,7 @@
+ 		"usage": ["ccusage [daily] <OPTIONS>", "ccusage <COMMANDS>"],
+ 		"commands": [
+ 			{"name": "dsh", "description": "Show DeepSeek Harness token usage commands ($0)"},
++			{"name": "devin", "description": "Show Devin token usage commands ($0)"},
+ 			{
+ 				"name": "daily",
+ 				"description": "Show all detected coding (agent) CLI usage grouped by date"
+@@ -794,6 +795,50 @@
+ 			"usage": "ccusage dsh weekly <OPTIONS>",
+ 			"options": "agent_period_options"
+ 		},
++		{
++			"path": ["devin"],
++			"description": "Usage reports for devin.",
++			"usage": "ccusage devin <COMMANDS>",
++			"commands": [
++				{"name": "weekly", "description": "Show Devin usage grouped by week"},
++				{
++					"name": "daily",
++					"description": "Show Devin usage grouped by date"
++				},
++				{
++					"name": "monthly",
++					"description": "Show Devin usage grouped by month"
++				},
++				{
++					"name": "session",
++					"description": "Show Devin usage grouped by session"
++				}
++			]
++		},
++		{
++			"path": ["devin", "daily"],
++			"description": "Show Devin usage grouped by date",
++			"usage": "ccusage devin daily <OPTIONS>",
++			"options": "agent_period_options"
++		},
++		{
++			"path": ["devin", "monthly"],
++			"description": "Show Devin usage grouped by month",
++			"usage": "ccusage devin monthly <OPTIONS>",
++			"options": "agent_period_options"
++		},
++		{
++			"path": ["devin", "session"],
++			"description": "Show Devin usage grouped by session",
++			"usage": "ccusage devin session <OPTIONS>",
++			"options": "agent_options"
++		},
++		{
++			"path": ["devin", "weekly"],
++			"description": "Show Devin usage grouped by week",
++			"usage": "ccusage devin weekly <OPTIONS>",
++			"options": "agent_period_options"
++		},
+ 		{
+ 			"path": ["openclaw"],
+ 			"description": "Usage reports for openclaw.",
+diff --git a/rust/crates/ccusage-cli-parser/src/parser.rs b/rust/crates/ccusage-cli-parser/src/parser.rs
+index 47d307b..2358429 100644
+--- a/rust/crates/ccusage-cli-parser/src/parser.rs
++++ b/rust/crates/ccusage-cli-parser/src/parser.rs
+@@ -346,6 +346,15 @@ fn parse_command(
+             STANDARD_AGENT_REPORTS,
+             Command::Qwen,
+         ),
++        "devin" => {
++            parse_basic_agent_command(
++                parser,
++                shared,
++                "devin",
++                OPENCODE_AGENT_REPORTS,
++                Command::Devin,
++            )
++        }
+         "dsh" => {
+             parse_basic_agent_command(parser, shared, "dsh", OPENCODE_AGENT_REPORTS, Command::Dsh)
+         }
+@@ -836,6 +845,7 @@ fn is_command(arg: &str) -> bool {
+             | "antigravity"
+             | "kimi"
+             | "qwen"
++            | "devin"
+             | "dsh"
+             | "grok"
+             | "zcode"
+@@ -998,6 +1008,7 @@ fn is_agent_command(command: &str) -> bool {
+             | "antigravity"
+             | "kimi"
+             | "qwen"
++            | "devin"
+             | "dsh"
+             | "openclaw"
+             | "grok"
+@@ -1012,7 +1023,7 @@ fn agent_report_supported(agent: &str, report: &str) -> bool {
+             "daily" | "weekly" | "monthly" | "session" | "blocks" | "statusline"
+         ),
+         "codex" => matches!(report, "daily" | "monthly" | "session"),
+-        "opencode" | "dsh" => matches!(report, "daily" | "weekly" | "monthly" | "session"),
++        "opencode" | "dsh" | "devin" => matches!(report, "daily" | "weekly" | "monthly" | "session"),
+         "amp" | "droid" | "codebuff" | "hermes" | "pi" | "goose" | "kilo" | "copilot"
+         | "gemini" | "antigravity" | "kimi" | "qwen" | "openclaw" | "grok" | "zcode" => {
+             matches!(report, "daily" | "monthly" | "session")
+@@ -1038,6 +1049,7 @@ fn agent_display_name(agent: &str) -> &'static str {
+         "antigravity" => "Antigravity",
+         "kimi" => "Kimi",
+         "qwen" => "Qwen",
++        "devin" => "Devin",
+         "dsh" => "DSH",
+         "openclaw" => "OpenClaw",
+         "grok" => "Grok",
+@@ -1126,6 +1138,7 @@ fn report_shared<'a>(
+             | Command::Antigravity(args)
+             | Command::Kimi(args)
+             | Command::Qwen(args)
++            | Command::Devin(args)
+             | Command::Dsh(args)
+             | Command::OpenClaw(args)
+             | Command::Grok(args)
+diff --git a/rust/crates/ccusage-cli-parser/src/snapshots/ccusage_cli_parser__tests__root_help.snap b/rust/crates/ccusage-cli-parser/src/snapshots/ccusage_cli_parser__tests__root_help.snap
+index 82577c7..b4c7d97 100644
+--- a/rust/crates/ccusage-cli-parser/src/snapshots/ccusage_cli_parser__tests__root_help.snap
++++ b/rust/crates/ccusage-cli-parser/src/snapshots/ccusage_cli_parser__tests__root_help.snap
+@@ -9,6 +9,7 @@ USAGE:
+ 
+ COMMANDS:
+   dsh                        Show DeepSeek Harness token usage commands ($0)
++  devin                      Show Devin token usage commands ($0)
+   daily                      Show all detected coding (agent) CLI usage grouped by date
+   monthly                    Show all detected coding (agent) CLI usage grouped by month
+   weekly                     Show all detected coding (agent) CLI usage grouped by week
+@@ -36,6 +37,7 @@ COMMANDS:
+ 
+ For more info, run any command with the `--help` flag:
+   ccusage dsh --help
++  ccusage devin --help
+   ccusage daily --help
+   ccusage monthly --help
+   ccusage weekly --help
+diff --git a/rust/crates/ccusage-cli-parser/src/tests.rs b/rust/crates/ccusage-cli-parser/src/tests.rs
+index 2bdf0fd..7240ce6 100644
+--- a/rust/crates/ccusage-cli-parser/src/tests.rs
++++ b/rust/crates/ccusage-cli-parser/src/tests.rs
+@@ -205,6 +205,7 @@ fn command_snapshot(command: Option<Command>) -> Value {
+         Some(Command::Antigravity(args)) => agent_command_snapshot("antigravity", args),
+         Some(Command::Kimi(args)) => agent_command_snapshot("kimi", args),
+         Some(Command::Qwen(args)) => agent_command_snapshot("qwen", args),
++        Some(Command::Devin(args)) => agent_command_snapshot("devin", args),
+         Some(Command::Dsh(args)) => agent_command_snapshot("dsh", args),
+         Some(Command::OpenClaw(args)) => agent_command_snapshot("openclaw", args),
+         Some(Command::Grok(args)) => agent_command_snapshot("grok", args),
+@@ -1760,3 +1761,14 @@ fn parses_dsh_period_and_session_reports() {
+         assert!(args.shared.json);
+     }
+ }
++
++#[test]
++fn parses_devin_period_and_session_reports() {
++    for report in ["daily", "weekly", "monthly", "session"] {
++        let cli = parse(&["ccusage", "devin", report, "--json"]);
++        let Some(Command::Devin(args)) = cli.command else {
++            panic!("expected devin command")
++        };
++        assert!(args.shared.json);
++    }
++}
+diff --git a/rust/crates/ccusage-cli/src/types.rs b/rust/crates/ccusage-cli/src/types.rs
+index 63e79a5..dc6f599 100644
+--- a/rust/crates/ccusage-cli/src/types.rs
++++ b/rust/crates/ccusage-cli/src/types.rs
+@@ -25,6 +25,7 @@ pub enum Command {
+     Antigravity(AgentCommandArgs),
+     Kimi(AgentCommandArgs),
+     Qwen(AgentCommandArgs),
++    Devin(AgentCommandArgs),
+     Dsh(AgentCommandArgs),
+     OpenClaw(AgentCommandArgs),
+     Grok(AgentCommandArgs),
+diff --git a/rust/crates/ccusage-core/src/lib.rs b/rust/crates/ccusage-core/src/lib.rs
+index 62a4a9b..96854f6 100644
+--- a/rust/crates/ccusage-core/src/lib.rs
++++ b/rust/crates/ccusage-core/src/lib.rs
+@@ -76,6 +76,7 @@ pub const BUILT_IN_AGENT_NAMES: &[&str] = &[
+     "grok",
+     "zcode",
+     "dsh",
++    "devin",
+ ];
+ 
+ pub type Result<T> = std::result::Result<T, CliError>;
+diff --git a/rust/crates/ccusage/Cargo.toml b/rust/crates/ccusage/Cargo.toml
+index 20c92de..ad760e3 100644
+--- a/rust/crates/ccusage/Cargo.toml
++++ b/rust/crates/ccusage/Cargo.toml
+@@ -34,6 +34,7 @@ ccusage-adapter-openclaw.workspace = true
+ ccusage-adapter-opencode.workspace = true
+ ccusage-adapter-pi.workspace = true
+ ccusage-adapter-qwen.workspace = true
++ccusage-adapter-devin.workspace = true
+ ccusage-adapter-dsh.workspace = true
+ ccusage-adapter-zcode.workspace = true
+ ccusage-cli-parser.workspace = true
+diff --git a/rust/crates/ccusage/src/adapter/mod.rs b/rust/crates/ccusage/src/adapter/mod.rs
+index 8323db2..1e14f85 100644
+--- a/rust/crates/ccusage/src/adapter/mod.rs
++++ b/rust/crates/ccusage/src/adapter/mod.rs
+@@ -6,6 +6,7 @@ pub(crate) use ccusage_adapter_codebuff as codebuff;
+ pub(crate) use ccusage_adapter_codex as codex;
+ pub(crate) use ccusage_adapter_copilot as copilot;
+ pub(crate) use ccusage_adapter_droid as droid;
++pub(crate) use ccusage_adapter_devin as devin;
+ pub(crate) use ccusage_adapter_dsh as dsh;
+ pub(crate) use ccusage_adapter_gemini as gemini;
+ pub(crate) use ccusage_adapter_goose as goose;
+diff --git a/rust/crates/ccusage/src/cli/last_window.rs b/rust/crates/ccusage/src/cli/last_window.rs
+index 40858f3..2850463 100644
+--- a/rust/crates/ccusage/src/cli/last_window.rs
++++ b/rust/crates/ccusage/src/cli/last_window.rs
+@@ -49,6 +49,7 @@ fn window_target(cli: &mut Cli) -> Option<(&mut SharedArgs, PeriodUnit, WeekDay)
+             | Command::Antigravity(args)
+             | Command::Kimi(args)
+             | Command::Qwen(args)
++            | Command::Devin(args)
+             | Command::Dsh(args)
+             | Command::OpenClaw(args)
+             | Command::Grok(args)
+diff --git a/rust/crates/ccusage/src/cli/timezone.rs b/rust/crates/ccusage/src/cli/timezone.rs
+index 76ad11b..ca97d1d 100644
+--- a/rust/crates/ccusage/src/cli/timezone.rs
++++ b/rust/crates/ccusage/src/cli/timezone.rs
+@@ -48,6 +48,7 @@ fn command_shared(command: &Command) -> &SharedArgs {
+         | Command::Antigravity(args)
+         | Command::Kimi(args)
+         | Command::Qwen(args)
++        | Command::Devin(args)
+         | Command::Dsh(args)
+         | Command::OpenClaw(args)
+         | Command::Grok(args)
+diff --git a/rust/crates/ccusage/src/main.rs b/rust/crates/ccusage/src/main.rs
+index 187fd32..d0a0219 100644
+--- a/rust/crates/ccusage/src/main.rs
++++ b/rust/crates/ccusage/src/main.rs
+@@ -47,6 +47,7 @@ fn main() -> Result<()> {
+         Command::Goose(args) => adapter::goose::run(args),
+         Command::Kilo(args) => adapter::kilo::run(args),
+         Command::Qwen(args) => adapter::qwen::run(args),
++        Command::Devin(args) => adapter::devin::run(args),
+         Command::Dsh(args) => adapter::dsh::run(args),
+         Command::Copilot(args) => adapter::copilot::run(args),
+         Command::Gemini(args) => adapter::gemini::run(args),
+@@ -81,7 +82,7 @@ mod tests {
+ 
+     #[test]
+     fn agent_commands_are_exposed_by_independent_crates() {
+-        let runs: [fn(AgentCommandArgs) -> Result<()>; 18] = [
++        let runs: [fn(AgentCommandArgs) -> Result<()>; 19] = [
+             ccusage_adapter_amp::run,
+             ccusage_adapter_antigravity::run,
+             ccusage_adapter_codebuff::run,
+@@ -98,11 +99,12 @@ mod tests {
+             ccusage_adapter_opencode::run,
+             ccusage_adapter_pi::run,
+             ccusage_adapter_qwen::run,
++            ccusage_adapter_devin::run,
+             ccusage_adapter_dsh::run,
+             ccusage_adapter_zcode::run,
+         ];
+ 
+-        assert_eq!(runs.len(), 18);
++        assert_eq!(runs.len(), 19);
+     }
+ 
+     #[test]

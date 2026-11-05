@@ -26,12 +26,19 @@ def prepare():
         archive.seek(0)
         run('tar', '-xf', '-', '-C', str(SOURCE), stdin=archive)
     run('git', 'init', '--quiet', str(SOURCE))
-    run('git', 'apply', '--check', str(ROOT / 'patches/dsh.patch'), cwd=SOURCE)
-    run('git', 'apply', str(ROOT / 'patches/dsh.patch'), cwd=SOURCE)
-    shutil.copytree(ROOT / 'adapter', SOURCE / 'rust/adapters/dsh')
+    for patch in ('dsh.patch', 'devin.patch'):
+        patch = ROOT / 'patches' / patch
+        if not patch.exists():
+            continue
+        run('git', 'apply', '--check', str(patch), cwd=SOURCE)
+        run('git', 'apply', str(patch), cwd=SOURCE)
+    for source_dir, target in (('adapter', 'dsh'), ('adapter-devin', 'devin')):
+        source_dir = ROOT / source_dir
+        if source_dir.exists():
+            shutil.copytree(source_dir, SOURCE / 'rust/adapters' / target)
     package_path = SOURCE / 'package.json'
     package = json.loads(package_path.read_text())
-    package['version'] += '+dsh.1'
+    package['version'] += '+dsh.devin.1'
     package_path.write_text(json.dumps(package, indent='\t')+'\n')
     # Keep dependency resolution committed alongside the overlay, not in the submodule.
     lock = ROOT / 'Cargo.lock'
@@ -49,9 +56,10 @@ def main():
     env = dict(os.environ, CARGO_TARGET_DIR=str(BUILD / 'target'), CCUSAGE_VERSION=json.loads((SOURCE/'package.json').read_text())['version'])
     if args.test:
         env['DSH_HOME'] = str(BUILD/'empty-dsh-home')
+        env['DEVIN_HOME'] = str(BUILD/'empty-devin-home')
     command = ['cargo', 'test' if args.test else 'build', '--manifest-path', 'rust/Cargo.toml']
     if args.test:
-        command += ['-p', 'ccusage-adapter-dsh', '-p', 'ccusage-cli-parser', '-p', 'ccusage-adapter-all', '-p', 'ccusage']
+        command += ['-p', 'ccusage-adapter-dsh', '-p', 'ccusage-adapter-devin', '-p', 'ccusage-cli-parser', '-p', 'ccusage-adapter-all', '-p', 'ccusage']
     else:
         command += ['--release', '-p', 'ccusage']
     command += ['--features', 'ccusage/fetch-litellm-pricing']
